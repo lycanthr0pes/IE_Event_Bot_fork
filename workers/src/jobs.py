@@ -1,30 +1,21 @@
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
-try:
-    from workers import fetch as _runtime_fetch
-except Exception:
-    _runtime_fetch = globals().get("fetch")
+from workers import fetch as _runtime_fetch
 
-if _runtime_fetch is None:
-    async def fetch(*args, **kwargs):
-        raise RuntimeError("fetch_not_available")
-else:
-    async def fetch(url, options=None):
-        opts = options or {}
-        try:
-            return await _runtime_fetch(
-                url,
-                method=opts.get("method"),
-                headers=opts.get("headers"),
-                body=opts.get("body"),
-            )
-        except TypeError:
-            return await _runtime_fetch(url, opts)
 
-if TYPE_CHECKING:
-    fetch: Any
+async def fetch(url: str, options: dict[str, Any] | None = None) -> Any:
+    opts = options or {}
+    try:
+        return await _runtime_fetch(
+            url,
+            method=opts.get("method"),
+            headers=opts.get("headers"),
+            body=opts.get("body"),
+        )
+    except TypeError:
+        return await _runtime_fetch(url, opts)
 
 """
 定期ジョブ群（QA通知 / 前日リマインド / Notion cleanup）を提供するモジュール。
@@ -305,14 +296,15 @@ async def run_qa_notification_job(env, state, return_detail: bool = False):
         cache = {}
     # 初回実行判定(キャッシュに _first_qa_run が無ければ True)
     first_run = bool(cache.get("_first_qa_run", True))
-    new_cache = {"_first_qa_run": False}
+    new_cache: dict[str, str | bool] = {"_first_qa_run": False}
     had_error = False
     failed_page_ids = []
 
     for page in pages:
-        page_id = (page or {}).get("id")
-        if not page_id:
+        page_id_raw = (page or {}).get("id")
+        if not page_id_raw:
             continue
+        page_id = str(page_id_raw)
         last = str((page or {}).get("last_edited_time") or "")
         new_cache[page_id] = last
         if first_run:
@@ -486,22 +478,6 @@ async def _notion_archive_page(env, page_id: str) -> bool:
     return int(response.status) in (200, 201)
 
 
-def _archive_external_due(date_obj, now_utc: datetime) -> bool:
-    """
-    外部DBのアーカイブ判定。
-    end（なければ start）日付が「今日から30日以上前」なら true。
-    """
-    if not isinstance(date_obj, dict):
-        return False
-    ended_at = _parse_rfc3339(date_obj.get("end") or date_obj.get("start"))
-    if not ended_at:
-        return False
-    if ended_at.tzinfo is None:
-        ended_at = ended_at.replace(tzinfo=timezone.utc)
-    age = now_utc.date() - ended_at.astimezone(timezone.utc).date()
-    return age.days >= 30
-
-
 def _archive_internal_due(date_obj, now_utc: datetime) -> bool:
     """
     内部DBのアーカイブ判定。
@@ -530,11 +506,10 @@ async def run_auto_clean_job(env, state, return_detail: bool = False):
     """
     Notion cleanup ジョブ本体。
     - interval guard を満たさない場合は skip
-    - 外部DB/内部DBの条件に従って対象ページをアーカイブ
+    - 内部DBの条件に従って対象ページをアーカイブ
     - 最終実行時刻を KV に保存
     """
     internal_db = _env_text(env, "NOTION_EVENT_INTERNAL_ID", "")
-    external_db = _env_text(env, "NOTION_EVENT_ID", "")
     date_prop = _env_text(env, "NOTION_PROP_DATE", "日時")
     now_utc = _utc_now()
 
@@ -553,20 +528,7 @@ async def run_auto_clean_job(env, state, return_detail: bool = False):
     archived = 0
     had_error = False
 
-    # 外部DBを掃除
-    if external_db:
-        pages = await _notion_query_all_pages(env, external_db)
-        for page in pages:
-            scanned += 1
-            if not _archive_external_due(_extract_date(page, date_prop), now_utc):
-                continue
-            ok = await _notion_archive_page(env, str((page or {}).get("id") or ""))
-            if ok:
-                archived += 1
-            else:
-                had_error = True
-
-    # 外部DBを掃除
+    # 内部DBを掃除
     if internal_db:
         pages = await _notion_query_all_pages(env, internal_db)
         for page in pages:

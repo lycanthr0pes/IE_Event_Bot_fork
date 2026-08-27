@@ -1,33 +1,24 @@
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Any, TYPE_CHECKING
+from typing import Any
 from urllib.parse import quote
+
+from workers import fetch as _runtime_fetch
 
 from google_auth import get_google_access_token
 
-try:
-    from workers import fetch as _runtime_fetch
-except Exception:
-    _runtime_fetch = globals().get("fetch")
 
-if _runtime_fetch is None:
-    async def fetch(*args, **kwargs):
-        raise RuntimeError("fetch_not_available")
-else:
-    async def fetch(url, options=None):
-        opts = options or {}
-        try:
-            return await _runtime_fetch(
-                url,
-                method=opts.get("method"),
-                headers=opts.get("headers"),
-                body=opts.get("body"),
-            )
-        except TypeError:
-            return await _runtime_fetch(url, opts)
-
-if TYPE_CHECKING:
-    fetch: Any
+async def fetch(url: str, options: dict[str, Any] | None = None) -> Any:
+    opts = options or {}
+    try:
+        return await _runtime_fetch(
+            url,
+            method=opts.get("method"),
+            headers=opts.get("headers"),
+            body=opts.get("body"),
+        )
+    except TypeError:
+        return await _runtime_fetch(url, opts)
 
 """
 Discord Scheduled Events の一覧をポーリングし、前回スナップショットとの差分を
@@ -283,15 +274,18 @@ async def _list_discord_scheduled_events(env):
     return result, None
 
 
-async def _discord_send_message(env, channel_id: str, content: str) -> str | None:
+async def _discord_send_message(env, channel_id: str, content: str, allowed_mentions=None) -> str | None:
     """Discord チャンネルへ通常メッセージを投稿し、message_id を返す。"""
     if not channel_id or not content:
         return None
+    payload = {"content": content}
+    if allowed_mentions is not None:
+        payload["allowed_mentions"] = allowed_mentions
     result, _status = await _discord_api_request(
         env,
         "POST",
         f"/channels/{channel_id}/messages",
-        payload={"content": content},
+        payload=payload,
     )
     message_id = str((result or {}).get("id") or "").strip()
     return message_id or None
@@ -513,12 +507,18 @@ def _build_event_created_message(env, event: dict) -> str | None:
         return None
     name = str((event or {}).get("name") or "(タイトルなし)").strip() or "(タイトルなし)"
     start_dt, _end_dt = _parse_discord_event_times(event)
-    lines = [
-        "📢 新しいイベントが作成されました",
-        "参加者は✅リアクションで参加表明してください",
-        "",
-        f"イベント名: {name}",
-    ]
+    lines = []
+    role_id = _env_text(env, "EVENT_CREATE_ROLE_ID", "")
+    if role_id:
+        lines.append(f"<@&{role_id}>")
+    lines.extend(
+        [
+            "📢 新しいイベントが作成されました",
+            "参加者は✅リアクションで参加表明してください",
+            "",
+            f"イベント名: {name}",
+        ]
+    )
     start_unix = _discord_unix_timestamp(start_dt)
     if start_unix is not None:
         lines.append(f"開始日時: <t:{start_unix}:F>")
@@ -536,10 +536,19 @@ async def _notify_discord_event_created(env, event: dict) -> bool:
     channel_id = _env_text(env, "EVENT_CREATE_CHANNEL_ID", "")
     if not channel_id:
         return False
+    role_id = _env_text(env, "EVENT_CREATE_ROLE_ID", "")
     message = _build_event_created_message(env, event)
     if not message:
         return False
-    message_id = await _discord_send_message(env, channel_id, message)
+    allowed_mentions = None
+    if role_id:
+        allowed_mentions = {"parse": ["roles"], "users": [], "everyone": False}
+    message_id = await _discord_send_message(
+        env,
+        channel_id,
+        message,
+        allowed_mentions=allowed_mentions,
+    )
     if not message_id:
         return False
     # 参加表明用の✅リアクションを付与する
@@ -808,15 +817,16 @@ async def run_discord_notion_poll_sync(env, state):
     """
     # 現在のDiscord一覧から新スナップショットを生成。
     events, list_error = await _list_discord_scheduled_events(env)
-    if list_error:
+    if list_error or events is None:
+        error = list_error or "discord_list_invalid_response"
         return {
             "ok": False,
-            "error": list_error,
+            "error": error,
             "created": 0,
             "updated": 0,
             "deleted": 0,
             "error_count": 1,
-            "errors": [list_error],
+            "errors": [error],
         }
 
     current_snapshot = {} # フィンガープリント
