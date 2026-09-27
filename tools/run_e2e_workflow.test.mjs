@@ -1380,7 +1380,7 @@ for (const failure of [null, "prepare", "advance", "early_done", "late_done", "v
         return {
           ok: !(args.sync_phase === (failure === "verify" ? "resume" : failure)),
           run_id: RUN_ID, status: 200, dirty: true, error: "sync_faults_probe_failed",
-          execution_status: (advances === 7 && failure !== "late_done") || (failure === "early_done" && advances === 1) ? "prepared" : "partial",
+          execution_status: (advances === 9 && failure !== "late_done") || (failure === "early_done" && advances === 1) ? "prepared" : "partial",
         };
       },
       assert_external_state: async () => ({ ok: true, manifest: { outcome: failure === "outcome" ? "failed_clean" : "passed" } }),
@@ -1393,7 +1393,7 @@ for (const failure of [null, "prepare", "advance", "early_done", "late_done", "v
     }
     if (!failure) {
       assert.deepEqual(calls.filter((call) => call.name === "trigger_sync").map((call) => call.args.sync_phase),
-        ["prepare", ...Array(7).fill("advance"), "resume"]);
+        ["prepare", ...Array(9).fill("advance"), "resume"]);
     }
     if (failure === "advance") { assert.equal(advances, 1); }
     assert.equal(calls.filter((call) => call.name === "deploy_e2e").length, 1);

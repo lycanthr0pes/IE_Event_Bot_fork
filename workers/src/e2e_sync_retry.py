@@ -3,12 +3,17 @@
 from asyncio import sleep
 
 from sync_retry import QUEUE_KEYS, is_quarantined, retry_metadata, retry_now
+from sync_retry_admin import load_retry_items
 
 
 async def wait_before_retry(state, sources=("google", "discord")):
     deadlines = []
     for source in sources:
-        for item in await state.get_json(QUEUE_KEYS[source], []) or []:
+        if source == "discord":
+            items, _ = await load_retry_items(state, source)
+        else:
+            items = await state.get_json(QUEUE_KEYS[source], []) or []
+        for item in items:
             if not is_quarantined(item):
                 deadlines.append(retry_metadata(item).get("next_attempt_at", 0))
     delay = max(deadlines, default=0) - retry_now()

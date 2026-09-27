@@ -21,6 +21,9 @@ def run(coro):
 
 @pytest.fixture
 def env(monkeypatch):
+    import e2e_sync_retry
+    import sync_retry
+
     env = environment()
     env.E2E_SYNC_FAULTS_ENABLED = "true"
     now = [1000.0]
@@ -34,6 +37,12 @@ def env(monkeypatch):
 
     monkeypatch.setattr(probe, "_wait_write", no_delay)
     monkeypatch.setattr(probe, "_wait_expired", expire)
+    async def advance(delay):
+        now[0] += delay
+
+    monkeypatch.setattr(sync_retry, "retry_now", lambda: int(now[0]))
+    monkeypatch.setattr(e2e_sync_retry, "retry_now", lambda: int(now[0]))
+    monkeypatch.setattr(e2e_sync_retry, "sleep", advance)
     return env
 
 
@@ -327,7 +336,7 @@ def test_slow_cases_fit_separate_request_budgets(env, monkeypatch):
     monkeypatch.setattr(probe, "_ttl_case", slow_ttl)
     monkeypatch.setattr(probe.asyncio, "wait_for", deadline)
     assert run(prepare_all(env))[0] == 200
-    assert durations == [7] * 7 + [11]
+    assert durations == [7] * 7 + [11, 0, 0]
     assert run(request(env, "/verify"))[0] == 200
     assert run(request(env, "/cleanup"))[0] == 200
     assert manifest(env)["outcome"] == "passed"
@@ -358,4 +367,3 @@ def test_do_rejects_skipped_case_or_fake_completion(env):
 
 
 # 各同期を別の定期実行として検証する。即時再送は専用テストで検証する。
-pytestmark = pytest.mark.usefixtures("spaced_sync_runs")

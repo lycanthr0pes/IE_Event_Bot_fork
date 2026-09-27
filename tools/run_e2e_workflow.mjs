@@ -532,7 +532,7 @@ export async function runGoogleSyncRecovery(callTool, runId) {
   return { ok: true, recovered: "google_sync" };
 }
 
-const SYNC_FAULT_CASE_COUNT = 8;
+const SYNC_FAULT_CASE_COUNT = 10;
 
 async function runDiscordKvSmoke(callTool, runId, scenario, verifiedStage, options) {
   const deployed = await requireTool(callTool, "deploy_e2e", {
@@ -554,7 +554,7 @@ async function runDiscordKvSmoke(callTool, runId, scenario, verifiedStage, optio
       if (prepared.execution_status !== "partial") {
         throw new E2eWorkflowError("sync_faults_prepare_failed");
       }
-      // 残り7ケースを1 HTTPずつ実行する。書込みの自動再送はしない。
+      // 残り9ケースを1 HTTPずつ実行する。書込みの自動再送はしない。
       for (let index = 1; index < SYNC_FAULT_CASE_COUNT; index += 1) {
         const advanced = await requireTool(callTool, "trigger_sync", {
           run_id: runId, scenario, sync_phase: "advance",

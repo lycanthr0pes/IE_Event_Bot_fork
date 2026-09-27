@@ -317,13 +317,15 @@ TTLケースは手動Discord同期の共通処理を10秒TTLで保持する。DO
 
 通常入口には段階間の期限・所有者確認を追加した。Discord同期後の結果保存、Google取得後の適用開始、適用後のcursor保存、Discord開始、最終時刻・結果保存の前でDOの時刻とownerを確認し、不一致・期限切れ・確認不能なら409で停止する。これは確認とKV書込みの原子的な保護ではなく、同期本体内のqueue保存、実行済み外部書込み、進行中の外部API処理を取り消さない。TTL以内の完了、全書込みの排他、一度限りの反映は保証しない。
 
-DO所有manifestはrun・scope・対象・各ケースの証拠hashを保持する。verifyは8ケースの証拠と状態hashを別HTTPで実KVから読み、未作成キーの不在も照合する。失敗した再検証は以前の成功を無効化する。cleanupは固定48候補キーを削除し、制御DO `e2e:sync-fault-control` の所有ロック解放も読戻した後だけcleanとする。失敗時はdirtyを保持し、再回収できる。globalロックの強制解放は行わない。
+再試行の追加2ケースでは、既定300秒の待機中に後続イベントが進むこと、初回を含め6回で隔離され7回目の自動処理が起きないことを確認する。隔離ケースだけ待機間隔を1秒に短縮する。通常の管理HTTPハンドラをWorker内から呼び、認証拒否・隔離一覧・実DOロック下の再投入・再投入再送の冪等性・投稿済みIDの保持・queue消化を検査する。通知送信とリアクション失敗は固定モデルであり、管理APIを外部HTTPクライアントから呼ぶ検証や自然障害の観測ではない。状態と証拠はrun所有prefixへ実保存し、別HTTPのverifyで読み戻す。実Discord通知の確認は通知batchの別シナリオが担う。
 
-MCPは `trigger_sync(scenario="sync_faults", sync_phase="prepare" / "advance" / "resume")` と `cleanup_run(service="sync_faults")` を使う。手動workflow `deploy-and-sync-faults-smoke` は1回deploy・1回prepare・7回advanceと有限のverify待機、version・段階・outcomeの照合、通常と `always()` のcleanup、マスク済み監査収集へ接続する。
+DO所有manifestはrun・scope・対象・各ケースの証拠hashを保持する。verifyは10ケースの証拠と状態hashを別HTTPで実KVから読み、未作成キーの不在も照合する。失敗した再検証は以前の成功を無効化する。cleanupは固定60候補キーを削除し、制御DO `e2e:sync-fault-control` の所有ロック解放も読戻した後だけcleanとする。失敗時はdirtyを保持し、再回収できる。globalロックの強制解放は行わない。
+
+MCPは `trigger_sync(scenario="sync_faults", sync_phase="prepare" / "advance" / "resume")` と `cleanup_run(service="sync_faults")` を使う。手動workflow `deploy-and-sync-faults-smoke` は1回deploy・1回prepare・9回advanceと有限のverify待機、version・段階・outcomeの照合、通常と `always()` のcleanup、マスク済み監査収集へ接続する。
 
 ローカルでは実DOロジック・代替KVを使い、8ケース、所有者・hash変更の拒否、認証・version・設定拒否、部分保存・読戻し・回収・解放失敗を検証する。TTL単体テストはDOの時計を進め、手動・Cron分岐・全体同期の旧結果拒否と新owner保護、Google適用後のcursor保護、壊れた時計・statusの拒否を確認する。2026-09-14の[実行34839754885](https://github.com/lycanthr0pes/IE_Event_Bot_fork/actions/runs/34839754885)は `76ac4c8` を専用Workerへdeployし、KV障害7ケースのprepare処理を完了したが、約51.4秒で409 `sync_faults_probe_failed` となった。TTLケースと別HTTP読戻しは未完了である。50秒のphase上限への到達が疑われるが、旧エラー分類だけでは例外種別を確定できない。run内と `always()` のcleanupは200、対象manifestは `failed_clean`・`dirty=false`、全資源clean、version・run・commit一致をartifactで確認した。分割後は[実行34841715250](https://github.com/lycanthr0pes/IE_Event_Bot_fork/actions/runs/34841715250)で実KV・DO検証が成功した。
 
-分割後はprepareが先頭ケースを1件だけ実行し、advanceが残りを固定順に1件ずつ進める。途中は `partial`、8件完了後だけ `prepared` を返す。DOには着手前の `fault_testing`、確定後の `fault_partial` / `fault_prepared` と証拠hashを保存する。書込み途中の失敗は `fault_testing` に留まり、advanceで再実行・スキップせず回収する。途中でverifyを要求しても不完全として拒否し、確定済みの進捗は壊さない。workflowは書込みを再送せず、7回のadvanceと最後の完了応答を確認してからverifyへ進む。旧版のdirty記録も同run・同対象のcleanupで回収できる。
+分割後はprepareが先頭ケースを1件だけ実行し、advanceが残りを固定順に1件ずつ進める。途中は `partial`、10件完了後だけ `prepared` を返す。DOには着手前の `fault_testing`、確定後の `fault_partial` / `fault_prepared` と証拠hashを保存する。書込み途中の失敗は `fault_testing` に留まり、advanceで再実行・スキップせず回収する。途中でverifyを要求しても不完全として拒否し、確定済みの進捗は壊さない。workflowは書込みを再送せず、9回のadvanceと最後の完了応答を確認してからverifyへ進む。旧版のdirty記録も同run・同対象のcleanupで回収できる。
 
 分割・途中タイムアウト・所有者とversionの不一致・ケース飛越しをローカル検証する。合算60秒の固定遅延モデルで、各ケースを別要求へ分けたときだけ50秒予算内に収まることも確認する。これは実Cloudflareの処理時間の証明ではない。
 

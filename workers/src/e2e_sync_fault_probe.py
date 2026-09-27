@@ -32,6 +32,8 @@ CASES = (
     "snapshot_fail_before",
     "snapshot_fail_after",
     "ttl_manual",
+    "retry_wait",
+    "retry_quarantine",
 )
 CONTROL_NAME = "e2e:sync-fault-control"
 
@@ -357,9 +359,13 @@ async def _next_case(store, owner, invoke):
     """1 HTTPで1ケースだけ実行し、確定済み証拠に続く位置へ進める。"""
     case = CASES[len(owner["hashes"])]
     kv = FaultKV(store, owner, case)
-    evidence = await (
-        _ttl_case(kv, invoke) if case.startswith("ttl_") else _kv_case(kv)
-    )
+    if case.startswith("retry_"):
+        from e2e_retry_faults import retry_case
+        evidence = await retry_case(kv)
+    else:
+        evidence = await (
+            _ttl_case(kv, invoke) if case.startswith("ttl_") else _kv_case(kv)
+        )
     evidence["state_hashes"] = {k: _digest(v) for k, v in kv.latest.items()}
     text = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
     await kv.put("evidence", text)
