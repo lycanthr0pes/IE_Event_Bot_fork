@@ -415,7 +415,7 @@ async def _verify(env, store, owner, token):
             owner["step"] >= 3 and index == 0 and not (owner.get("notion_query_retry") or owner.get("notion_create_retry") or owner.get("notion_writeback_retry"))
         )
         if owner.get("notion_writeback_retry") and owner["step"] == 1:
-            absent = slot["google_event_id"] in expected[1:]
+            absent = slot["google_event_id"] in expected[:-1]
         if absent:
             if (
                 slot["google_event_id"] in notion_map

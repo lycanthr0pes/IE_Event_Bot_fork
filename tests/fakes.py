@@ -5,6 +5,20 @@ from types import SimpleNamespace
 from typing import Any
 
 
+def retry_payloads(items: list[dict] | None) -> list[dict]:
+    """再試行メタデータを検証し、旧payloadの保持を別途比較する。"""
+    from sync_retry import RETRY_FIELD, retry_metadata
+
+    assert isinstance(items, list)
+    for item in items:
+        if RETRY_FIELD in item:
+            retry = retry_metadata(item)
+            assert retry["attempts"] >= 1
+            assert retry["next_attempt_at"] > 0
+            assert retry["last_error"]
+    return [{k: v for k, v in item.items() if k != RETRY_FIELD} for item in items]
+
+
 class Headers:
     """大文字小文字を区別せずヘッダーを取得する。"""
 

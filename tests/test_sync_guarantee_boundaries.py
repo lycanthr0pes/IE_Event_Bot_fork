@@ -183,3 +183,7 @@ def test_expiry_during_result_put_can_overwrite_new_result(monkeypatch, source):
         await worker._release_sync_lock(replacement_owner["owner"])
 
     asyncio.run(scenario())
+
+
+# 各同期を別の定期実行として検証する。即時再送は専用テストで検証する。
+pytestmark = pytest.mark.usefixtures("spaced_sync_runs")

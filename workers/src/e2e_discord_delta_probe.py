@@ -46,6 +46,7 @@ class _DeltaEnv:
     STATE_KV = None
     SYNC_COORDINATOR = None
     DISCORD_NOTION_MAX_CHANGES_PER_RUN = "1"
+    SYNC_EVENT_RETRY_SECONDS = "1"
 
     def __init__(self, env):
         self._env = env
@@ -181,6 +182,8 @@ async def _apply_owned_diff(
         stages[f"{phase}_checkpoint_read"] = 409
         return False
     stages[f"{phase}_checkpoint_read"] = 200
+    from e2e_sync_retry import wait_before_retry
+    await wait_before_retry(state, ("discord",))
     result = await _apply_discord_event_diff(
         env, state, events, upsert_runner=apply_owned, delete_runner=delete_owned,
     )

@@ -355,3 +355,7 @@ def test_do_rejects_skipped_case_or_fake_completion(env):
         with pytest.raises(RuntimeError, match="write_failed"):
             run(StateStore(env).put_e2e_manifest(probe.SERVICE, changed))
     assert manifest(env) == owner
+
+
+# 各同期を別の定期実行として検証する。即時再送は専用テストで検証する。
+pytestmark = pytest.mark.usefixtures("spaced_sync_runs")

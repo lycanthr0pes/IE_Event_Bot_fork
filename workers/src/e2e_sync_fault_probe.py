@@ -189,7 +189,8 @@ async def _kv_case(kv):
     """通常差分処理を通し、適用回数と古いqueueからの残件回復を検証する。"""
     first, second = _event("probe-1"), _event("probe-2")
     env = SimpleNamespace(
-        DISCORD_TO_GOOGLE_SYNC_ENABLED="false", DISCORD_NOTION_MAX_CHANGES_PER_RUN="1"
+        DISCORD_TO_GOOGLE_SYNC_ENABLED="false", DISCORD_NOTION_MAX_CHANGES_PER_RUN="1",
+        SYNC_EVENT_RETRY_SECONDS="1",
     )
     calls = []
     fail_apply = False
@@ -203,6 +204,8 @@ async def _kv_case(kv):
 
     async def poll(events):
         # 毎回StateStoreを作り直す。外部適用は呼出し回数だけを記録する代替。
+        from e2e_sync_retry import wait_before_retry
+        await wait_before_retry(kv.state(), ("discord",))
         return await _apply_discord_event_diff(
             env,
             kv.state(),
@@ -239,7 +242,7 @@ async def _kv_case(kv):
             result = await poll([first, second])
             if result["pending_changes"] == 0:
                 break
-        expected = [first["id"], first["id"], second["id"]]
+        expected = [first["id"], second["id"], first["id"]]
         lost = first["id"] not in calls
         if lost:
             raise ProbeError("sync_faults_pending_lost")

@@ -96,6 +96,8 @@ Google Calendar webhook と Discord Bot を入口にして、差分同期、通�
 - `SYNC_DO_LOCK_TTL_SECONDS=120`
 - `GOOGLE_APPLY_MAX_EVENTS_PER_RUN=5`
 - `DISCORD_NOTION_MAX_CHANGES_PER_RUN=2`
+- `SYNC_EVENT_MAX_RETRIES=5`（初回を除く再試行回数）
+- `SYNC_EVENT_RETRY_SECONDS=300`（イベント単位の再試行間隔）
 - `CRON_ENABLE_SYNC=true`
 - `CRON_ENABLE_DISCORD_NOTION_SYNC=false`
 - `CRON_ENABLE_GCAL_WATCH_ENSURE=true`
@@ -268,6 +270,7 @@ curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
 - Google 認証失敗: `/admin/migration-status` の `google_auth` を確認
 - watch 更新失敗: `watch_state.expiration` と `CRON_ENABLE_GCAL_WATCH_ENSURE` を確認
 - キュー滞留: `sync:google_apply_queue` と `sync:discord_notion_queue` を確認
+- 再試行上限・隔離・再投入: [イベント同期の再試行](docs/SYNC-RETRY.md)
 - 疎通切り分け: `/admin/migration-status?include_checks=1`
 
 ## 11. 開発メモ

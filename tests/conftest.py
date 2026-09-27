@@ -6,6 +6,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+import pytest
+
 
 SOURCE_DIR = Path(__file__).resolve().parents[1] / "workers" / "src"
 sys.path.insert(0, str(SOURCE_DIR))
@@ -58,3 +60,28 @@ setattr(workers_runtime, "WorkerEntrypoint", WorkerEntrypoint)
 setattr(workers_runtime, "DurableObject", DurableObject)
 setattr(workers_runtime, "fetch", blocked_fetch)
 sys.modules["workers"] = workers_runtime
+
+
+@pytest.fixture
+def spaced_sync_runs(monkeypatch):
+    """既存の復旧テストでは同期の呼出し間を5分進め、実時間を待たない。"""
+    import discord_notion_sync
+    import google_apply_sync
+    import sync_retry
+    import e2e_sync_retry
+
+    now = [20000]
+    select = sync_retry.select_retry_items
+
+    def next_run(items, limit):
+        now[0] += 300
+        return select(items, limit)
+
+    async def advance(delay):
+        now[0] += int(delay)
+
+    monkeypatch.setattr(sync_retry, "retry_now", lambda: now[0])
+    monkeypatch.setattr(e2e_sync_retry, "retry_now", lambda: now[0])
+    monkeypatch.setattr(e2e_sync_retry, "sleep", advance)
+    monkeypatch.setattr(discord_notion_sync, "select_retry_items", next_run)
+    monkeypatch.setattr(google_apply_sync, "select_retry_items", next_run)

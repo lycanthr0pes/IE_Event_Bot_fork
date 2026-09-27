@@ -13,7 +13,7 @@ from e2e_discord_batch_state import NOTIFICATION_SERVICE, BatchDiscordKV, key_pr
 from e2e_discord_kv_state import KEYS
 from e2e_entry import Default
 from state import StateStore
-from tests.fakes import Request
+from tests.fakes import Request, retry_payloads
 from tests.test_e2e_discord_batch_probe import env_for_batch
 from tests.test_e2e_discord_notion_probe import GUILD_ID, RUN_ID, install_api_stub, run
 
@@ -155,7 +155,7 @@ def complete(env):
         assert status == 200, result
 
 
-def test_notify_retry_uses_same_message_then_delivers_deferred_event(monkeypatch):
+def test_deferred_event_precedes_retry_using_same_message(monkeypatch):
     env = environment()
     events, pages, messages, calls, _ = install(monkeypatch, env)
     original = dict(env.STATE_KV.data)
@@ -165,16 +165,16 @@ def test_notify_retry_uses_same_message_then_delivers_deferred_event(monkeypatch
     first_id = first["message_id"]
     assert len(pages) == len(messages) == 1
     adapter = BatchDiscordKV(StateStore(env), owner(env))
-    assert run(adapter.state().get_json(KEYS[1])) == [
-        {
-            "op": "notify",
-            "id": first["discord_event_id"],
-            "notification": {"channel_id": CHANNEL, "message_id": first_id},
-        },
+    assert retry_payloads(run(adapter.state().get_json(KEYS[1]))) == [
         {
             "op": "upsert",
             "id": second["discord_event_id"],
             "notification": {"channel_id": CHANNEL},
+        },
+        {
+            "op": "notify",
+            "id": first["discord_event_id"],
+            "notification": {"channel_id": CHANNEL, "message_id": first_id},
         },
     ]
     assert not any(method == "PUT" for method, _ in calls)
@@ -182,12 +182,13 @@ def test_notify_retry_uses_same_message_then_delivers_deferred_event(monkeypatch
     assert call(env, "/verify")[0] == 200
     assert call(env, "/advance")[1]["status"] == "retry_drained"
     assert owner(env)["fixtures"][0]["message_id"] == first_id
-    assert len(pages) == len(messages) == 1
-    assert messages[first_id]["reactions"][0]["me"] is True
+    assert len(pages) == len(messages) == 2
+    assert not messages[first_id].get("reactions")
     assert call(env, "/advance")[0] == 409
     assert call(env, "/verify")[1]["stage"] == "batch_retry_verified"
     assert call(env, "/advance")[1]["status"] == "drained"
     assert len(pages) == len(messages) == 2
+    assert messages[first_id]["reactions"][0]["me"] is True
     assert run(adapter.state().get_json(KEYS[1])) == []
     assert call(env, "/verify")[0] == 200
     assert call(env, "/verify")[0] == 200
@@ -441,7 +442,7 @@ def test_real_reaction_error_is_not_confused_with_expected_injection(monkeypatch
     assert call(env, "/advance")[0] == 409
     assert (
         sum(method == "POST" and path.endswith("/messages") for method, path in calls)
-        == 1
+        == 2
     )
     assert call(env, "/cleanup")[0] == 200
     assert not messages and owner(env)["outcome"] == "failed_clean"
@@ -469,7 +470,7 @@ def test_stale_second_queue_read_cannot_repeat_completed_notification(monkeypatc
     env.STATE_KV.get = stale_get
     before = len(calls)
     assert call(env, "/advance")[0] == 409
-    assert reads == 2 and len(pages) == 1
+    assert reads == 2 and len(pages) == 2
     assert not any(
         method in ("POST", "PUT", "PATCH") and not path.endswith("/query")
         for method, path in calls[before:]
@@ -500,3 +501,7 @@ def test_do_cannot_mark_clean_while_message_cleanup_is_pending(monkeypatch):
     changed["fixtures"][0]["cleanup_done"] = True
     with pytest.raises(RuntimeError):
         run(StateStore(env).put_e2e_manifest(NOTIFICATION_SERVICE, changed))
+
+
+# 各同期を別の定期実行として検証する。即時再送は専用テストで検証する。
+pytestmark = pytest.mark.usefixtures("spaced_sync_runs")

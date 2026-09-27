@@ -18,6 +18,8 @@ from google_watch import ensure_watch_active
 from health_checks import run_connectivity_checks
 from jobs import run_auto_clean_job, run_day_before_reminder_job, run_qa_notification_job
 from state import JobStateWriteError, StateStore
+from sync_retry import QUEUE_KEYS
+from sync_retry_admin import load_retry_items, quarantine_summary, requeue_event
 from sync_lock_do import SyncCoordinator
 from sync_lock_release import (
     _RPC_TIMEOUT_SECONDS, _recover_release, _release_error_type, _release_retry_blocked,
@@ -121,6 +123,11 @@ class Default(WorkerEntrypoint):
                 return Response("unauthorized", status=401)
             result, status = await self._run_discord_sync(state, source="manual-discord-notion")
             return _json_response(result, status=status)
+
+        if path in ("/admin/sync/quarantine", "/admin/sync/requeue"):
+            if not self._authorized(request):
+                return Response("unauthorized", status=401)
+            return await self._handle_sync_retry(request, state, path, parsed_url.query)
 
         # 管理API経由で Google access token を手動登録する入口
         if path == "/admin/google-token":
@@ -566,6 +573,54 @@ class Default(WorkerEntrypoint):
             return result, 200 if result.get("ok") else 500
         except SyncLockLost:
             return {"ok": False, "error": "sync_lock_lost"}, 409
+        finally:
+            if owner:
+                await self._release_sync_lock(owner)
+
+    async def _handle_sync_retry(self, request, state, path: str, query: str):
+        """隔離の読取りと再投入。書込みは通常同期と同じDOロックを使う。"""
+        read_only = path == "/admin/sync/quarantine"
+        expected_method = "GET" if read_only else "POST"
+        if str(request.method).upper() != expected_method:
+            return _json_response({"ok": False, "error": "method_not_allowed"}, 405)
+        if not state.enabled():
+            return _json_response({"ok": False, "error": "state_unavailable"}, 503)
+        if read_only:
+            payload = {"source": parse_qs(query).get("source", [""])[0]}
+        else:
+            try:
+                payload = json.loads(await request.text())
+            except (ValueError, TypeError):
+                payload = None
+        if (not isinstance(payload, dict) or not isinstance(payload.get("source"), str)
+                or payload["source"] not in QUEUE_KEYS):
+            return _json_response({"ok": False, "error": "invalid_source"}, 400)
+        source = payload["source"]
+        if read_only:
+            try:
+                items, _ = await load_retry_items(state, source)
+                return _json_response({"ok": True, "source": source, "events": quarantine_summary(items)})
+            except Exception:
+                return _json_response({"ok": False, "error": "retry_state_unavailable"}, 503)
+        event_id = payload.get("event_id")
+        if not isinstance(event_id, str) or not event_id.strip():
+            return _json_response({"ok": False, "error": "invalid_event_id"}, 400)
+        if not self._durable_lock_enabled() or getattr(self.env, "SYNC_COORDINATOR", None) is None:
+            return _json_response({"ok": False, "error": "sync_lock_required"}, 503)
+        acquired = await self._acquire_sync_lock(source="admin-requeue")
+        if not acquired.get("ok"):
+            code = 409 if acquired.get("locked") else 503
+            return _json_response({"ok": False, "error": "sync_lock_unavailable"}, code)
+        owner = acquired.get("owner")
+        try:
+            await self._require_sync_owner(owner)
+            result, status = await requeue_event(state, source, event_id.strip())
+            await self._require_sync_owner(owner)
+            return _json_response(result, status)
+        except SyncLockLost:
+            return _json_response({"ok": False, "error": "sync_lock_lost"}, 409)
+        except Exception:
+            return _json_response({"ok": False, "error": "retry_state_write_failed"}, 503)
         finally:
             if owner:
                 await self._release_sync_lock(owner)

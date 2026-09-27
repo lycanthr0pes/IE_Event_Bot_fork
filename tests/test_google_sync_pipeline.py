@@ -1,6 +1,8 @@
 """通常Google同期を取得から適用・状態保存まで接続する。外部APIは代替する。"""
 
 import asyncio
+from tests.fakes import retry_payloads
+import pytest
 import json
 from copy import deepcopy
 from urllib.parse import parse_qs, urlparse
@@ -131,7 +133,7 @@ def test_paginated_fetch_queue_drain_update_and_delete(monkeypatch):
     assert "updatedMin" not in pipeline.requests[0]
     assert pipeline.requests[1]["pageToken"] == ["page-two"]
     assert pipeline.kv.data[CURSOR] == second["updated"]
-    assert json.loads(pipeline.kv.data[QUEUE]) == [second]
+    assert retry_payloads(json.loads(pipeline.kv.data[QUEUE])) == [second]
     assert set(pipeline.pages) == {"page-first"}
 
     # 2分の重複範囲を再取得しても、既存残件を先に処理する。
@@ -158,7 +160,7 @@ def test_paginated_fetch_queue_drain_update_and_delete(monkeypatch):
     assert pipeline.kv.data[CURSOR] == cancelled["updated"]
 
 
-def test_apply_exception_keeps_cursor_and_retries_before_remainder(monkeypatch):
+def test_apply_exception_yields_to_remainder_and_keeps_cursor(monkeypatch):
     pipeline = Pipeline(monkeypatch)
     pipeline.kv.data[CURSOR] = "2099-01-01T11:00:00Z"
     first, second = event("first"), event("second")
@@ -166,13 +168,15 @@ def test_apply_exception_keeps_cursor_and_retries_before_remainder(monkeypatch):
     status, result = pipeline.run((200, {"items": [first, second]}))
     assert status == 500 and result["google_apply"]["pending_events"] == 2
     assert pipeline.kv.data[CURSOR] == "2099-01-01T11:00:00Z"
-    assert json.loads(pipeline.kv.data[QUEUE]) == [first, second]
+    assert retry_payloads(json.loads(pipeline.kv.data[QUEUE])) == [second, first]
     assert not pipeline.pages and not pipeline.discord
     status, result = pipeline.run((200, {"items": [first, second]}))
-    assert status == 200 and result["google_apply"]["pending_events"] == 1
-    assert set(pipeline.pages) == {"page-first"}
-    assert json.loads(pipeline.kv.data[QUEUE]) == [second]
-    assert pipeline.kv.data[CURSOR] == first["updated"]
+    assert status == 500 and result["google_apply"]["pending_events"] == 1
+    assert set(pipeline.pages) == {"page-second"}
+    assert retry_payloads(json.loads(pipeline.kv.data[QUEUE])) == [first]
+    assert pipeline.kv.data[CURSOR] == "2099-01-01T11:00:00Z"
+    assert pipeline.run((200, {"items": []}))[0] == 200
+    assert set(pipeline.pages) == {"page-first", "page-second"}
 
 
 def test_second_page_error_does_not_apply_or_advance_cursor(monkeypatch):
@@ -204,13 +208,13 @@ def test_discord_create_failure_keeps_partial_notion_and_retries(monkeypatch):
     assert status == 500 and result["google_apply"]["pending_events"] == 1
     assert pipeline.kv.data[CURSOR] == "2099-01-01T11:00:00Z"
     assert set(pipeline.pages) == {"page-first"} and not pipeline.discord
-    assert json.loads(pipeline.kv.data[QUEUE]) == [source]
+    assert retry_payloads(json.loads(pipeline.kv.data[QUEUE])) == [source]
     assert json.loads(pipeline.kv.data["result:sync_all"])["payload"]["google_apply_ok"] is False
     monkeypatch.setattr(apply, "_discord_api_request", original)
     assert pipeline.run((200, {"items": []}))[0] == 200
     assert set(pipeline.pages) == {"page-first"}
     assert set(pipeline.discord) == {"discord-first"}
-    assert json.loads(pipeline.kv.data[QUEUE]) == []
+    assert retry_payloads(json.loads(pipeline.kv.data[QUEUE])) == []
 
 
 def test_discord_update_failure_preserves_cursor_and_last_success(monkeypatch):
@@ -232,12 +236,12 @@ def test_discord_update_failure_preserves_cursor_and_last_success(monkeypatch):
     assert asyncio.run(StateStore(pipeline.worker.env).get_sync_last_epoch()) == last_epoch
     assert pipeline.pages["page-first"]["content"] == "after"
     assert "after" not in pipeline.discord["discord-first"]["description"]
-    assert json.loads(pipeline.kv.data[QUEUE]) == [changed]
+    assert retry_payloads(json.loads(pipeline.kv.data[QUEUE])) == [changed]
     monkeypatch.setattr(apply, "_discord_api_request", original)
     assert pipeline.run((200, {"items": []}))[0] == 200
     assert "after" in pipeline.discord["discord-first"]["description"]
     assert len(pipeline.pages) == len(pipeline.discord) == 1
-    assert json.loads(pipeline.kv.data[QUEUE]) == []
+    assert retry_payloads(json.loads(pipeline.kv.data[QUEUE])) == []
 
 
 def test_disabled_discord_sync_remains_successful(monkeypatch):
@@ -247,3 +251,7 @@ def test_disabled_discord_sync_remains_successful(monkeypatch):
     assert status == 200 and result["google_apply"]["pending_events"] == 0
     assert set(pipeline.pages) == {"page-first"}
     assert not pipeline.discord_calls
+
+
+# 各同期を別の定期実行として検証する。即時再送は専用テストで検証する。
+pytestmark = pytest.mark.usefixtures("spaced_sync_runs")

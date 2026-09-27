@@ -285,7 +285,9 @@ async def _apply(env, store, owner, token, invoke):
                             notion_updater if owner["step"] == 24 else None)
     payload = json.loads(await response.text())
     applied = payload.get("google_apply", {})
-    if response.status != (500 if failed else 200) or payload.get("ok") is not (not failed):
+    # 複数失敗の一部だけ復旧した段階では、未解決の再試行が残る。
+    unresolved = failed or owner["step"] in (15, 16)
+    if response.status != (500 if unresolved else 200) or payload.get("ok") is not (not unresolved):
         raise GoogleStateError("google_matrix_apply_failed")
     queue = json.loads(await kv.get(KEYS[3]) or "[]")
     expected_count = PENDING_COUNTS.get(owner["step"], 0)
@@ -316,7 +318,7 @@ async def _apply(env, store, owner, token, invoke):
         stage = {12: "google_matrix_cursor_preserved", 14: "google_matrix_multi_cursor_preserved",
                  24: "google_matrix_notion_cursor_preserved", 26: "google_matrix_delete_cursor_preserved"}[owner["step"]]
         owner["stages"][stage] = 200
-    else:
+    elif not unresolved:
         owner["expected_cursor"] = payload["google"]["next_updated_min"]
     if owner["step"] in (13, 15, 16, 17, 25, 27) and applied.get("processed") != 1:
         raise GoogleStateError("google_matrix_retry_count_mismatch")
@@ -346,7 +348,7 @@ async def _verify(env, store, owner, token):
         if [e["id"] for e in json.loads(values[KEYS[3]] or "[]")] != owner["pending_ids"]:
             raise GoogleStateError("google_matrix_queue_mismatch")
         result = json.loads(values[KEYS[5]] or "{}")["payload"]
-        if any(result.get(k) is not (owner["step"] not in (12, 14, 24, 26)) for k in ("ok", "google_apply_ok")):
+        if any(result.get(k) is not (owner["step"] not in (12, 14, 15, 16, 24, 26)) for k in ("ok", "google_apply_ok")):
             raise GoogleStateError("google_matrix_result_mismatch")
         notion_map, discord_map = json.loads(values[KEYS[1]] or "{}")["internal"], json.loads(values[KEYS[2]] or "{}")
     for index, slot in enumerate(owner["fixtures"]):

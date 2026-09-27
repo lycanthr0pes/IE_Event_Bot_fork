@@ -171,3 +171,7 @@ def test_private_error_is_not_returned_and_partial_resources_are_recovered(monke
     assert "private" not in json.dumps(payload)
     assert test.call("cleanup")[0] == 200
     assert not test.discord and all(p.get("archived") for p in test.pages.values())
+
+
+# 各同期を別の定期実行として検証する。即時再送は専用テストで検証する。
+pytestmark = pytest.mark.usefixtures("spaced_sync_runs")

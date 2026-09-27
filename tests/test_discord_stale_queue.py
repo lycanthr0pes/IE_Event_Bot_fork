@@ -194,3 +194,7 @@ def test_visible_queue_keeps_retry_priority_and_snapshot_fills_missing():
         *queue,
         {"op": "delete", "id": "missing"},
     ]
+
+
+# 各同期を別の定期実行として検証する。即時再送は専用テストで検証する。
+pytestmark = pytest.mark.usefixtures("spaced_sync_runs")

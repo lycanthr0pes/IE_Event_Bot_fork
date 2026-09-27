@@ -574,3 +574,7 @@ def test_empty_name_recovery_rejects_unowned_event(monkeypatch, field, value):
     assert test.call("cleanup")[0] == 409
     assert event_id in test.discord
     assert test.owner()["dirty"] is True
+
+
+# 各同期を別の定期実行として検証する。即時再送は専用テストで検証する。
+pytestmark = pytest.mark.usefixtures("spaced_sync_runs")

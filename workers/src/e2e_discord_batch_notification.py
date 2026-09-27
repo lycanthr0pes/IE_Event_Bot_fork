@@ -183,7 +183,7 @@ class NotificationBatch:
         slots = self.manifest["fixtures"]
         for index, slot in enumerate(slots):
             found = await self.find(slot)
-            if pending and index == 1:
+            if pending and index == 1 and not slot.get("notion_page_id"):
                 if (
                     found
                     or slot.get("message_id")
@@ -211,10 +211,9 @@ class NotificationBatch:
                 "id": second["discord_event_id"],
                 "notification": {"channel_id": self.channel},
             }
-        ]
+        ] if not second.get("notion_page_id") else []
         if not first.get("reaction_done"):
-            queue.insert(
-                0,
+            queue.append(
                 {
                     "op": "notify",
                     "id": first["discord_event_id"],
@@ -222,6 +221,7 @@ class NotificationBatch:
                         "channel_id": self.channel,
                         "message_id": first["message_id"],
                     },
+                    "_sync_retry": first["notification_retry"],
                 },
             )
         return queue

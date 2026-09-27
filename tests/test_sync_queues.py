@@ -1,6 +1,8 @@
 """同期件数上限と失敗時のキュー繰り越しを検証する。"""
 
 import asyncio
+from tests.fakes import retry_payloads
+import pytest
 from types import SimpleNamespace
 
 import discord_notion_sync
@@ -13,7 +15,7 @@ def run(coroutine):
     return asyncio.run(coroutine)
 
 
-def test_google_apply_retries_failure_before_remaining_events(monkeypatch) -> None:
+def test_google_apply_moves_failure_after_remaining_events(monkeypatch) -> None:
     async def fail_query(env, database_id, google_event_id):
         raise RuntimeError("temporary failure")
 
@@ -39,7 +41,7 @@ def test_google_apply_retries_failure_before_remaining_events(monkeypatch) -> No
     assert result["processed"] == 1
     assert result["pending_events"] == 2
     assert isinstance(queue, list)
-    assert [event["id"] for event in queue] == ["google-1", "google-2"]
+    assert [event["id"] for event in queue] == ["google-2", "google-1"]
 
 
 def test_google_apply_processes_saved_queue_on_next_run(monkeypatch) -> None:
@@ -75,7 +77,7 @@ def test_google_apply_processes_saved_queue_on_next_run(monkeypatch) -> None:
     assert run(store.get_json("sync:google_apply_queue")) == []
 
 
-def test_discord_sync_retries_failure_before_remaining_changes(monkeypatch) -> None:
+def test_discord_sync_moves_failure_after_remaining_changes(monkeypatch) -> None:
     events = [{"id": "discord-1"}, {"id": "discord-2"}]
 
     async def list_events(env):
@@ -100,7 +102,11 @@ def test_discord_sync_retries_failure_before_remaining_changes(monkeypatch) -> N
     assert result["ok"] is False
     assert result["processed_changes"] == 1
     assert result["pending_changes"] == 2
-    assert queue == [
-        {"op": "upsert", "id": "discord-1"},
+    assert retry_payloads(queue) == [
         {"op": "upsert", "id": "discord-2"},
+        {"op": "upsert", "id": "discord-1"},
     ]
+
+
+# 各同期を別の定期実行として検証する。即時再送は専用テストで検証する。
+pytestmark = pytest.mark.usefixtures("spaced_sync_runs")

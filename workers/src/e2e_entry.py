@@ -819,6 +819,12 @@ class Default(ApplicationDefault):
                 return _json_response({"ok": False, "error": "not_found"}, status=404)
             async def invoke(probe_env, probe_state, fetcher, discord_syncer=None, notion_updater=None, *, discord_runner=None, source="e2e-google-sync", normal_http=False):
                 from google_apply_sync import apply_google_events
+                from e2e_sync_retry import wait_before_retry
+
+                await wait_before_retry(
+                    StateStore(probe_env) if normal_http else probe_state,
+                    ("google", "discord") if discord_runner is not None or normal_http else ("google",),
+                )
 
                 if normal_http:
                     from entry import Application as HttpApplication

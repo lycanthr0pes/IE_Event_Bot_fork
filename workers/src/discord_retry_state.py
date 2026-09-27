@@ -3,6 +3,8 @@
 import json
 from copy import deepcopy
 
+from sync_retry import RETRY_FIELD, merge_retry_metadata, retry_metadata
+
 PENDING_FIELD = "_pending_sync"
 
 
@@ -21,10 +23,11 @@ def split_snapshot(snapshot: dict) -> tuple[dict, list]:
             not isinstance(op, dict)
             or op.get("id") != event_id
             or op.get("op") not in ("upsert", "delete", "notify")
-            or set(op) - {"op", "id", "notification"}
+            or set(op) - {"op", "id", "notification", RETRY_FIELD}
             or value.get("id") != event_id
         ):
             raise RuntimeError("discord_snapshot_pending_invalid")
+        retry_metadata(op)
         pending.append(op)
         if op["op"] == "delete":
             observed.pop(event_id, None)
@@ -45,6 +48,9 @@ def merge_retry_ops(snapshot_ops: list, queue_ops: list) -> list:
             merged[event_id] = op
             continue
         previous = merged[event_id]
+        retry = merge_retry_metadata(previous, op)
+        if retry:
+            previous[RETRY_FIELD] = retry
         # 未適用の可能性が残る場合は通知だけの再試行に縮めない。
         if op.get("op") == "upsert":
             previous["op"] = "upsert"

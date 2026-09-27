@@ -1,5 +1,6 @@
 """通常StateStoreの保存・復元を検証する。KVと外部APIだけを代替する。"""
 import asyncio
+from tests.fakes import retry_payloads
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -66,7 +67,7 @@ def test_saved_retry_restores_and_does_not_repeat(monkeypatch, operation):
     env, kv, calls = prepare(monkeypatch, operation)
     first = run(sync.run_discord_notion_poll_sync(env, StateStore(env)))
     assert first['ok'] is False and first['pending_changes'] == 1
-    assert run(StateStore(env).get_json(QUEUE)) == [
+    assert retry_payloads(run(StateStore(env).get_json(QUEUE))) == [
         {'id': 'owned-1', 'op': 'delete' if operation == 'delete' else 'upsert'}]
     second = run(sync.run_discord_notion_poll_sync(env, StateStore(env)))
     assert second['ok'] is True and second['processed_changes'] == 1
@@ -74,7 +75,7 @@ def test_saved_retry_restores_and_does_not_repeat(monkeypatch, operation):
     third = run(sync.run_discord_notion_poll_sync(env, StateStore(env)))
     assert third['ok'] is True and third['processed_changes'] == 0
     assert calls == ['apply', 'apply']
-    assert run(StateStore(env).get_json(QUEUE)) == []
+    assert retry_payloads(run(StateStore(env).get_json(QUEUE))) == []
     assert kv.data['unrelated'] == 'preserve'
 
 
@@ -123,7 +124,7 @@ def test_unprocessed_limit_remainder_survives_restart(monkeypatch, fail_queue):
         assert set(applied_ids) == {'owned-1', 'owned-2'}
     else:
         assert applied_ids == ['owned-1', 'owned-2']
-    assert run(StateStore(env).get_json(QUEUE)) == []
+    assert retry_payloads(run(StateStore(env).get_json(QUEUE))) == []
 
 
 def test_manual_route_serializes_concurrent_updates(monkeypatch):
@@ -180,8 +181,12 @@ def test_retry_survives_snapshot_write_failure(monkeypatch, operation):
     with pytest.raises(RuntimeError, match='injected_snapshot_write_failure'):
         run(sync.run_discord_notion_poll_sync(env, StateStore(env)))
     assert run(StateStore(env).get_discord_snapshot()) == old_snapshot
-    assert run(StateStore(env).get_json(QUEUE)) == [
+    assert retry_payloads(run(StateStore(env).get_json(QUEUE))) == [
         {'id': 'owned-1', 'op': 'delete' if operation == 'delete' else 'upsert'}]
     result = run(sync.run_discord_notion_poll_sync(env, StateStore(env)))
     assert result['ok'] is True and result['pending_changes'] == 0
     assert calls == ['apply', 'apply']
+
+
+# 各同期を別の定期実行として検証する。即時再送は専用テストで検証する。
+pytestmark = pytest.mark.usefixtures("spaced_sync_runs")

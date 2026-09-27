@@ -1,6 +1,7 @@
 """run状態の永続化、競合拒否、回収を実DOロジックとメモリstorageで確認する。"""
 
 import json
+from tests.fakes import retry_payloads
 from copy import deepcopy
 
 import pytest
@@ -53,7 +54,7 @@ def test_retry_survives_new_state_store_and_coordinator(monkeypatch, operation):
     manifest = run(store.get_e2e_manifest("discord_delta"))
     assert isinstance(manifest, dict)
     saved = manifest["delta_checkpoint"]
-    assert saved["queue"] == [{"id": DISCORD_EVENT_ID, "op": operation}]
+    assert retry_payloads(saved["queue"]) == [{"id": DISCORD_EVENT_ID, "op": operation}]
 
     # Pythonオブジェクトを作り直し、同じ保存領域だけを引き継ぐ。
     stub = env.SYNC_COORDINATOR.stub
@@ -208,3 +209,7 @@ def test_checkpoint_rejects_unowned_embedded_retry(mutation):
     with pytest.raises(RuntimeError, match='e2e_delta_checkpoint_write_failed'):
         run(store.put_e2e_delta_checkpoint(owner, value))
     assert env.SYNC_COORDINATOR.stub.durable_object.ctx.storage.data == before
+
+
+# 各同期を別の定期実行として検証する。即時再送は専用テストで検証する。
+pytestmark = pytest.mark.usefixtures("spaced_sync_runs")

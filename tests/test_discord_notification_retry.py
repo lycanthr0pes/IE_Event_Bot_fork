@@ -167,7 +167,7 @@ def test_notification_retry_counts_toward_limit(monkeypatch):
     assert first["pending_changes"] == 2
     second = poll(env)
     assert second["processed_changes"] == 1 and second["pending_changes"] == 2
-    assert calls["upsert"] == ["event-0"]
+    assert calls["upsert"] == ["event-0", "event-1"]
     third = poll(env)
     assert third["processed_changes"] == 1 and third["pending_changes"] == 1
     assert poll(env)["pending_changes"] == 0
@@ -187,12 +187,16 @@ def test_changed_channel_preserves_pending_delivery_without_retargeting(monkeypa
     failures[failure] = 1
     poll(env)
     saved_queue = run(StateStore(env).get_json(QUEUE))
+    assert isinstance(saved_queue, list)
     saved_calls = deepcopy(calls)
     env.EVENT_CREATE_CHANNEL_ID = channel
     result = poll(env)
     assert result["ok"] is False and result["pending_changes"] == 1
     assert calls == saved_calls
-    assert run(StateStore(env).get_json(QUEUE)) == saved_queue
+    queue = run(StateStore(env).get_json(QUEUE))
+    assert isinstance(queue, list)
+    assert queue[0]["notification"] == saved_queue[0]["notification"]
+    assert queue[0]["_sync_retry"]["attempts"] == 2
     env.EVENT_CREATE_CHANNEL_ID = "channel"
     assert poll(env)["pending_changes"] == 0
 
@@ -228,3 +232,7 @@ def test_invalid_notification_state_stops_before_external_writes(monkeypatch, no
         poll(env)
     assert all(not values for values in calls.values())
     assert run(StateStore(env).get_json(QUEUE)) == queue
+
+
+# 各同期を別の定期実行として検証する。即時再送は専用テストで検証する。
+pytestmark = pytest.mark.usefixtures("spaced_sync_runs")

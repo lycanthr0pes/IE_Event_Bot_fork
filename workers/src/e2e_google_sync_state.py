@@ -8,6 +8,7 @@ from hashlib import sha256
 from types import SimpleNamespace
 
 from state import StateStore
+from sync_retry import RETRY_FIELD, retry_metadata
 from e2e_discord_batch_state import slot_run_id
 
 SERVICE = "google_sync"
@@ -320,9 +321,13 @@ class GoogleKV:
             else:
                 valid = isinstance(data, list) and all(
                     isinstance(op, dict) and op.get("id") in owned_ids
-                    and op.get("op") == "upsert" and set(op) == {"id", "op"}
+                    and op.get("op") == "upsert"
+                    and {"id", "op"} <= set(op) <= {"id", "op", RETRY_FIELD}
                     for op in data
                 )
+                if valid:
+                    for op in data:
+                        retry_metadata(op)
             if not valid:
                 code = {"map:gcal_discord": "discord_map", "map:gcal_notion": "notion_map", "sync:google_apply_queue": "google_queue", "discord:snapshot": "snapshot", "sync:discord_notion_queue": "discord_queue"}[key]
                 raise GoogleStateError("google_sync_state_invalid" + ("_" + code if self.owner.get("http_sync") else ""))

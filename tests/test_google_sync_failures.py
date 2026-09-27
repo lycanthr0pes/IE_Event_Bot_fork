@@ -1,6 +1,7 @@
 """HTTP失敗後も通常Google同期の残件と対応IDを保持する。外部APIは代替する。"""
 
 import asyncio
+from tests.fakes import retry_payloads
 import json
 from copy import deepcopy
 
@@ -65,7 +66,7 @@ def test_http_failure_keeps_queue_cursor_and_recovers(monkeypatch, operation, ht
     assert failures
     assert status == 500
     assert result["google_apply"]["pending_events"] == 1
-    assert json.loads(scenario.env.STATE_KV.data[QUEUE]) == [source]
+    assert retry_payloads(json.loads(scenario.env.STATE_KV.data[QUEUE])) == [source]
     assert scenario.env.STATE_KV.data.get(CURSOR) == previous.get(CURSOR)
     assert asyncio.run(scenario.store.get_sync_last_epoch()) == previous_epoch
     assert "private failure details" not in json.dumps(result)
@@ -79,7 +80,7 @@ def test_http_failure_keeps_queue_cursor_and_recovers(monkeypatch, operation, ht
     scenario.google.clear()
     monkeypatch.setattr(apply, "fetch", original)
     assert dispatch(scenario)[0] == 200
-    assert json.loads(scenario.env.STATE_KV.data[QUEUE]) == []
+    assert retry_payloads(json.loads(scenario.env.STATE_KV.data[QUEUE])) == []
     assert len(scenario.pages) == 1
     page = next(iter(scenario.pages.values()))
     if operation in ("archive", "delete"):
@@ -104,11 +105,11 @@ def test_subrequest_limit_keeps_unattempted_events(monkeypatch):
     monkeypatch.setattr(apply, "fetch", failing)
     status, result = dispatch(scenario)
     assert status == 500 and result["google_apply"]["processed"] == 1
-    assert json.loads(scenario.env.STATE_KV.data[QUEUE]) == sources
+    assert retry_payloads(json.loads(scenario.env.STATE_KV.data[QUEUE])) == sources[1:] + sources[:1]
     monkeypatch.setattr(apply, "fetch", original)
     scenario.google.clear()
-    assert dispatch(scenario)[0] == 200
-    assert json.loads(scenario.env.STATE_KV.data[QUEUE]) == [sources[-1]]
+    assert dispatch(scenario)[0] == 500
+    assert retry_payloads(json.loads(scenario.env.STATE_KV.data[QUEUE])) == [sources[0]]
     assert dispatch(scenario)[0] == 200
     assert len(scenario.pages) == len(scenario.discord) == 4
 
@@ -120,7 +121,7 @@ def test_repeated_cancellation_accepts_discord_already_deleted(monkeypatch):
     scenario.discord.clear()
     scenario.google = {"first": event("first", status="cancelled")}
     assert dispatch(scenario)[0] == 200
-    assert json.loads(scenario.env.STATE_KV.data[QUEUE]) == []
+    assert retry_payloads(json.loads(scenario.env.STATE_KV.data[QUEUE])) == []
     assert json.loads(scenario.env.STATE_KV.data["map:gcal_discord"]) == {}
 
 
@@ -135,7 +136,7 @@ def test_discord_origin_cancel_does_not_delete_original(monkeypatch):
     })}
     assert dispatch(scenario)[0] == 200
     assert scenario.discord == original_discord
-    assert json.loads(scenario.env.STATE_KV.data[QUEUE]) == []
+    assert retry_payloads(json.loads(scenario.env.STATE_KV.data[QUEUE])) == []
 
 
 @pytest.mark.parametrize("count", [1, 2, 5, 17])
@@ -150,9 +151,13 @@ def test_event_counts_drain_without_loss_or_duplicate_creation(monkeypatch, coun
         status, result = dispatch(scenario)
         assert status == 200, result
         processed = min(processed + limit, count)
-        assert json.loads(scenario.env.STATE_KV.data[QUEUE]) == sources[processed:]
+        assert retry_payloads(json.loads(scenario.env.STATE_KV.data[QUEUE])) == sources[processed:]
         assert len(scenario.pages) == len(scenario.discord) == processed
         scenario.google.clear()
     assert len([call for call in scenario.calls if call == ("discord", "POST")]) == count
     assert len(json.loads(scenario.env.STATE_KV.data["map:gcal_notion"])["internal"]) == count
     assert len(json.loads(scenario.env.STATE_KV.data["map:gcal_discord"])) == count
+
+
+# 各同期を別の定期実行として検証する。即時再送は専用テストで検証する。
+pytestmark = pytest.mark.usefixtures("spaced_sync_runs")

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from tests.fakes import retry_payloads
 from copy import deepcopy
 
 import pytest
@@ -55,7 +56,9 @@ def test_actual_writeback_response_retains_queue_then_recovers(monkeypatch):
     first_ids = [(s.get("notion_page_id"), s.get("discord_event_id")) for s in test.owner()["fixtures"]]
     assert test.call("advance")[0] == 200
     assert test.rejections == 1
-    assert all(test.env.STATE_KV.data[k] == before[k] for k in (KEYS[0], KEYS[3], KEYS[4]))
+    original_queue = json.loads(before[KEYS[3]])
+    assert retry_payloads(json.loads(test.env.STATE_KV.data[KEYS[3]])) == original_queue[1:] + original_queue[:1]
+    assert all(test.env.STATE_KV.data[k] == before[k] for k in (KEYS[0], KEYS[4]))
     assert len(test.pages) == len(test.discord) == 2
     partial_ids = [(s.get("notion_page_id"), s.get("discord_event_id")) for s in test.owner()["fixtures"]]
     pending_id = json.loads(before[KEYS[3]])[0]["id"]
@@ -208,3 +211,7 @@ def test_wrong_writeback_value_prevents_verification(monkeypatch, step):
     assert test.call("verify")[0] == 409
     assert test.call("cleanup")[0] == 200
     assert test.owner()["outcome"] == "failed_clean"
+
+
+# 各同期を別の定期実行として検証する。即時再送は専用テストで検証する。
+pytestmark = pytest.mark.usefixtures("spaced_sync_runs")

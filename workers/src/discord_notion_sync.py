@@ -8,6 +8,10 @@ from urllib.parse import quote
 from workers import fetch as _runtime_fetch
 
 from discord_retry_state import merge_retry_ops, snapshot_with_pending, split_snapshot
+from sync_retry import (
+    RETRY_FIELD, has_failed_items, is_quarantined, record_retry_failure,
+    retry_counts, select_retry_items,
+)
 from google_auth import get_google_access_token
 
 _DISCORD_GET_ATTEMPTS = 4
@@ -1012,11 +1016,17 @@ async def _apply_discord_event_diff(
     for event_id in merged_ids:
         op_type = "upsert" if event_id in current_snapshot else "delete"
         queued = queued_by_id.get(event_id, {})
+        if is_quarantined(queued):
+            # 一覧から消えても隔離記録を消さず、明示再投入まで停止する。
+            merged_ops.append(queued)
+            continue
         if (op_type == "delete" and queued.get("op") == "notify"
                 and not _should_treat_missing_event_as_delete(previous_snapshot.get(event_id))):
             # 完了イベントは一覧から消えても同期先を削除せず、保留通知だけを破棄する。
             continue
         op = {"op": op_type, "id": event_id}
+        if RETRY_FIELD in queued:
+            op[RETRY_FIELD] = queued[RETRY_FIELD]
         if op_type == "upsert":
             notification = queued.get("notification")
             if notification is None and event_id in created_ids and channel_id:
@@ -1040,8 +1050,7 @@ async def _apply_discord_event_diff(
         merged_ops.append(op)
 
     # 変更対象イベントを今回処理する分と残りに分ける
-    target_ops = merged_ops[:max_changes]
-    remaining_ops = merged_ops[max_changes:]
+    target_ops, remaining_ops = select_retry_items(merged_ops, max_changes)
     processed_count = 0
     retry_ops = []
 
@@ -1052,50 +1061,49 @@ async def _apply_discord_event_diff(
         if not event_id:
             continue
         processed_count += 1
-        # 作成/更新
-        if op_type in ("upsert", "notify"):
-            event = current_events.get(event_id)
-            if not event:
-                retry_ops.append({"op": "delete", "id": event_id})
-                continue
-            apply = upsert_runner or _sync_discord_event_upsert
-            ok = op_type == "notify" or await apply(env, event, google_token)
-            if not ok:
-                had_error = True
-                errors.append(f"upsert_failed:{event_id}")
-                retry_ops.append(op)
-            elif "notification" in op:
-                notify = notify_runner or _notify_discord_event_created
-                notified = await notify(env, event, delivery=op["notification"])
-                if not notified:
-                    had_error = True
-                    errors.append(f"create_notify_failed:{event_id}")
-                    retry_ops.append({**op, "op": "notify"})
-        # 削除
-        else:
-            delete = delete_runner or _sync_discord_event_delete
-            ok = await delete(env, event_id, google_token)
-            if not ok:
-                had_error = True
-                errors.append(f"delete_failed:{event_id}")
-                retry_ops.append({"op": "delete", "id": event_id})
+        error = ""
+        try:
+            if op_type in ("upsert", "notify"):
+                event = current_events[event_id]
+                apply = upsert_runner or _sync_discord_event_upsert
+                ok = op_type == "notify" or await apply(env, event, google_token)
+                if not ok:
+                    error = "upsert_failed"
+                elif "notification" in op:
+                    # 投稿・リアクションの例外でも成功済み同期を繰り返さない。
+                    op = {**op, "op": "notify"}
+                    notify = notify_runner or _notify_discord_event_created
+                    if not await notify(env, event, delivery=op["notification"]):
+                        error = "create_notify_failed"
+            else:
+                delete = delete_runner or _sync_discord_event_delete
+                if not await delete(env, event_id, google_token):
+                    error = "delete_failed"
+        except Exception:
+            error = "event_exception"
+        if error:
+            had_error = True
+            errors.append(f"{error}:{event_id}")
+            retry_ops.append(record_retry_failure(env, op, error))
 
-    pending_changes = len(retry_ops) + len(remaining_ops)
+    next_queue = remaining_ops + retry_ops
+    pending_changes, quarantined_changes = retry_counts(next_queue)
 
     if state.enabled():
         # queue保存に失敗したときは旧snapshotから差分を再検出できるようにする。
-        await state.put_json_if_changed(queue_key, retry_ops + remaining_ops)
+        await state.put_json_if_changed(queue_key, next_queue)
         await state.set_discord_snapshot(
-            snapshot_with_pending(current_snapshot, previous_snapshot, retry_ops + remaining_ops)
+            snapshot_with_pending(current_snapshot, previous_snapshot, next_queue)
         )
 
     return {
-        "ok": not had_error,
+        "ok": not had_error and not has_failed_items(next_queue),
         "created": len(created_ids),
         "updated": len(updated_ids),
         "deleted": len(deleted_ids),
         "processed_changes": processed_count,
         "pending_changes": pending_changes,
+        "quarantined_changes": quarantined_changes,
         "max_changes_per_run": max_changes,
         "error_count": len(errors),
         "errors": errors[:20],

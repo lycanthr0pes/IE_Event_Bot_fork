@@ -4,6 +4,7 @@ import json
 import re
 from copy import deepcopy
 from hashlib import sha256
+from sync_retry import RETRY_FIELD, retry_metadata
 
 from e2e_discord_kv_state import KEYS, OwnedDiscordKV, _MAX_STATE_BYTES
 
@@ -254,10 +255,12 @@ class BatchDiscordKV(OwnedDiscordKV):
             raise ValueError("discord_state_value_forbidden")
         seen = set()
         for op in value:
-            if (not isinstance(op, dict) or set(op) != {"id", "op", "notification"}
+            if (not isinstance(op, dict)
+                    or not {"id", "op", "notification"} <= set(op) <= {"id", "op", "notification", RETRY_FIELD}
                     or op.get("id") not in slots or op["id"] in seen
                     or op.get("op") not in ("upsert", "notify")):
                 raise ValueError("discord_state_value_forbidden")
+            retry_metadata(op)
             seen.add(op["id"])
             delivery = op["notification"]
             if (not isinstance(delivery, dict)

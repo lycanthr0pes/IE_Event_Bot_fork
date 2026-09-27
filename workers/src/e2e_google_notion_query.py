@@ -107,7 +107,14 @@ async def apply_phase(env, store, owner, token, invoke):
         raise GoogleStateError(f"{prefix}_dispatch_mismatch")
     if failing:
         expected_error = f"notion_internal_create_failed:{queue[0]['id']}" if creating else f"exception:{queue[0]['id']}:RuntimeError"
-        preserved = (KEYS[0], KEYS[3], KEYS[4]) if writeback else KEYS[:-1]
+        preserved = (KEYS[0], KEYS[4]) if writeback else tuple(k for k in KEYS[:-1] if k != KEYS[3])
+        from sync_retry import RETRY_FIELD, retry_metadata
+        saved_queue = json.loads(after[KEYS[3]] or "[]")
+        if ([{k: v for k, v in item.items() if k != RETRY_FIELD} for item in saved_queue]
+                != queue[1:] + queue[:1]
+                or retry_metadata(saved_queue[-1]).get("attempts") != 1):
+            raise GoogleStateError(f"{prefix}_failure_queue_mismatch")
+        owner["pending_ids"] = [item["id"] for item in saved_queue]
         if (rejected != 1 or applied.get("error_count") != 1
                 or applied.get("errors") != [expected_error]
                 or any(before[k] != after[k] for k in preserved)):
@@ -164,7 +171,7 @@ async def verify_phase(env, store, owner):
     for slot in slots:
         page = next(p for p in pages if p["id"] == slot["notion_page_id"])
         event = next(e for e in events if e["id"] == slot["discord_event_id"])
-        missing = writeback and owner["step"] == 1 and slot["google_event_id"] == owner["pending_ids"][0]
+        missing = writeback and owner["step"] == 1 and slot["google_event_id"] == owner["pending_ids"][-1]
         if (not _page_owned(env, page, slot)
                 or _property_text(page, "メッセージID", "rich_text") != ("" if missing else slot["discord_event_id"])
                 or not _discord_event_is_owned(event, event_id=slot["discord_event_id"], guild_id=env.DISCORD_GUILD_ID, run_id=slot["run_id"])):

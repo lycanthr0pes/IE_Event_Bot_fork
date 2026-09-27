@@ -2,6 +2,11 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from sync_retry import (
+    RETRY_FIELD, has_failed_items, record_retry_failure, retry_counts,
+    select_retry_items,
+)
+
 from workers import fetch as _runtime_fetch
 
 
@@ -644,19 +649,27 @@ async def apply_google_events(env, state, events: list[dict], *, discord_syncer=
     # 新イベント
     incoming_events = list(events or [])
     # キュー内イベント
-    known_ids = {str((e or {}).get("id") or "") for e in queued_events} 
+    known_ids = {str((e or {}).get("id") or ""): i for i, e in enumerate(queued_events)}
     # 処理するイベント
     merged_queue = list(queued_events)
     for event in incoming_events:
         event_id = str((event or {}).get("id") or "")
-        if not event_id or event_id in known_ids:
+        if not event_id:
             continue
-        merged_queue.append(event)
-        known_ids.add(event_id)
+        incoming = {key: value for key, value in event.items() if key != RETRY_FIELD}
+        if event_id in known_ids:
+            index = known_ids[event_id]
+            saved = merged_queue[index]
+            # 修正・キャンセルを取り込みつつ、再取得で回数や隔離を解除しない。
+            if RETRY_FIELD in saved:
+                incoming[RETRY_FIELD] = saved[RETRY_FIELD]
+            merged_queue[index] = incoming
+        else:
+            known_ids[event_id] = len(merged_queue)
+            merged_queue.append(incoming)
 
     # 今回処理する分と、次回に回す分を分ける
-    target_events = merged_queue[:max_events]
-    remaining_events = merged_queue[max_events:]
+    target_events, remaining_events = select_retry_items(merged_queue, max_events)
 
     processed = 0
     had_error = False
@@ -800,9 +813,8 @@ async def apply_google_events(env, state, events: list[dict], *, discord_syncer=
                 )
                 if not page_id:
                     had_error = True
-                    event_failed = True
                     errors.append(f"notion_internal_create_failed:{google_event_id}")
-                    retry_events.append(event)
+                    retry_events.append(record_retry_failure(env, event, "notion_internal_create_failed"))
                     continue
                 page = {"id": page_id, "properties": {}}
                 internal_map[google_event_id] = str(page_id)
@@ -881,29 +893,30 @@ async def apply_google_events(env, state, events: list[dict], *, discord_syncer=
             detail = str(exc)
             if "too many subrequests" in detail.lower():
                 errors.append(f"subrequests_exceeded:{google_event_id}")
-                retry_events.append(event)
+                retry_events.append(record_retry_failure(env, event, "subrequests_exceeded"))
                 # 件数上限内でも、未着手の後続イベントは次回へ残す。
-                retry_events.extend(target_events[index + 1:])
+                remaining_events = target_events[index + 1:] + remaining_events
                 break
             errors.append(f"exception:{google_event_id}:{type(exc).__name__}")
 
         if event_failed:
-            retry_events.append(event)
+            retry_events.append(record_retry_failure(env, event, "google_apply_failed"))
 
     # 次回のためにマップとキューを保存
     gcal_notion_map["internal"] = internal_map
     gcal_notion_map["external"] = external_map
-    next_queue = retry_events + remaining_events
-    pending_events = len(next_queue)
+    next_queue = remaining_events + retry_events
+    pending_events, quarantined_events = retry_counts(next_queue)
     if state.enabled():
         await state.set_gcal_discord_map(gcal_discord_map)
         await state.set_gcal_notion_map(gcal_notion_map)
         await state.put_json_if_changed(queue_key, next_queue)
 
     return {
-        "ok": not had_error,
+        "ok": not had_error and not has_failed_items(next_queue),
         "processed": processed,
         "pending_events": pending_events,
+        "quarantined_events": quarantined_events,
         "max_events_per_run": max_events,
         "error_count": len(errors),
         "errors": errors[:20],

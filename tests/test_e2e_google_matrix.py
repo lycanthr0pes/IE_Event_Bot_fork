@@ -437,3 +437,7 @@ def test_matrix_recovers_after_series_write_response_loss(monkeypatch, target):
     assert test.call("cleanup")[0] == 200
     assert test.owner()["outcome"] == "failed_clean"
     assert all(e.get("status") == "cancelled" for e in test.google.values())
+
+
+# 各同期を別の定期実行として検証する。即時再送は専用テストで検証する。
+pytestmark = pytest.mark.usefixtures("spaced_sync_runs")

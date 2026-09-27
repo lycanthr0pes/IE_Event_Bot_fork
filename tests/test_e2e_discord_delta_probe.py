@@ -1,6 +1,7 @@
 """Discord差分E2Eの所有境界と失敗回収を外部通信なしで検証する。"""
 
 import json
+from tests.fakes import retry_payloads
 from copy import deepcopy
 
 import pytest
@@ -163,8 +164,8 @@ def test_delta_cleanup_retains_dirty_then_checks_run_and_target(monkeypatch):
     assert failed["dirty"] is True
     dirty_manifest = run(state.get_e2e_manifest("discord_delta"))
     assert isinstance(dirty_manifest, dict)
-    assert json.loads(dirty_manifest["delta_checkpoint"]["snapshot"][DISCORD_EVENT_ID])["_pending_sync"] == {"id": DISCORD_EVENT_ID, "op": "delete"}
-    assert dirty_manifest["delta_checkpoint"]["queue"] == [{"id": DISCORD_EVENT_ID, "op": "delete"}]
+    assert retry_payloads([json.loads(dirty_manifest["delta_checkpoint"]["snapshot"][DISCORD_EVENT_ID])["_pending_sync"]])[0] == {"id": DISCORD_EVENT_ID, "op": "delete"}
+    assert retry_payloads(dirty_manifest["delta_checkpoint"]["queue"]) == [{"id": DISCORD_EVENT_ID, "op": "delete"}]
     count = len(calls)
     blocked = run(probe.run_discord_delta_probe(env, state, RUN_ID))
     assert blocked["error"] == "environment_dirty"
@@ -306,13 +307,13 @@ def test_delta_delete_failure_retains_retry_in_snapshot_and_queue(monkeypatch):
     monkeypatch.setattr(discord_notion_sync, "_sync_discord_event_delete", delete)
     first = run(discord_notion_sync._apply_discord_event_diff(env, state, []))
     assert first["ok"] is False
-    assert json.loads(state.snapshot[DISCORD_EVENT_ID])["_pending_sync"] == {"id": DISCORD_EVENT_ID, "op": "delete"}
-    assert state.queue == [{"op": "delete", "id": DISCORD_EVENT_ID}]
+    assert retry_payloads([json.loads(state.snapshot[DISCORD_EVENT_ID])["_pending_sync"]])[0] == {"id": DISCORD_EVENT_ID, "op": "delete"}
+    assert retry_payloads(state.queue) == [{"op": "delete", "id": DISCORD_EVENT_ID}]
     second = run(discord_notion_sync._apply_discord_event_diff(env, state, []))
     assert second["ok"] is True
     assert second["deleted"] == 0
     assert second["processed_changes"] == 1
-    assert state.queue == []
+    assert retry_payloads(state.queue) == []
     assert calls == [DISCORD_EVENT_ID, DISCORD_EVENT_ID]
 
 
@@ -354,14 +355,14 @@ def test_delta_queue_retries_failed_owned_update_with_unchanged_snapshot(monkeyp
         probe._DeltaEnv(env), state, [event],
     ))
     assert first["ok"] is False
-    assert state.queue == [{"op": "upsert", "id": DISCORD_EVENT_ID}]
+    assert retry_payloads(state.queue) == [{"op": "upsert", "id": DISCORD_EVENT_ID}]
     second = run(discord_notion_sync._apply_discord_event_diff(
         probe._DeltaEnv(env), state, [event],
     ))
     assert second["ok"] is True
     assert second["created"] == second["updated"] == 0
     assert second["processed_changes"] == 1
-    assert state.queue == []
+    assert retry_payloads(state.queue) == []
     assert attempts == [DISCORD_EVENT_ID, DISCORD_EVENT_ID]
     assert env.STATE_KV.put_calls == []
 
@@ -526,3 +527,7 @@ def test_legacy_list_failure_cleanup_requires_preapply_evidence(monkeypatch, app
     result = run(probe.cleanup_discord_delta_probe(env, state, RUN_ID))
     assert result["ok"] is not apply_started
     assert result["dirty"] is apply_started
+
+
+# 各同期を別の定期実行として検証する。即時再送は専用テストで検証する。
+pytestmark = pytest.mark.usefixtures("spaced_sync_runs")

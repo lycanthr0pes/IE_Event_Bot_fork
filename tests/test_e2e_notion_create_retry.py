@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from tests.fakes import retry_payloads
 from copy import deepcopy
 
 import pytest
@@ -55,7 +56,9 @@ def test_actual_create_response_retains_queue_then_recovers(monkeypatch):
     first_ids = [(s.get("notion_page_id"), s.get("discord_event_id")) for s in test.owner()["fixtures"]]
     assert test.call("advance")[0] == 200
     assert test.rejections == 1
-    assert all(test.env.STATE_KV.data[k] == before[k] for k in KEYS[:-1])
+    original_queue = json.loads(before[KEYS[3]])
+    assert retry_payloads(json.loads(test.env.STATE_KV.data[KEYS[3]])) == original_queue[1:] + original_queue[:1]
+    assert all(test.env.STATE_KV.data[k] == before[k] for k in KEYS[:-1] if k != KEYS[3])
     assert len(test.pages) == len(test.discord) == 1
     assert test.call("advance")[0] == 409
     assert test.call("verify")[0] == 200
@@ -172,3 +175,7 @@ def test_tombstone_limit_rejects_before_writes(monkeypatch):
     assert status == 409 and payload["error"] == "google_sync_baseline_limit"
     assert not test.pages and not test.discord and len(test.google) == 257
     assert not asyncio.run(test.store.get_e2e_manifest(SERVICE))
+
+
+# 各同期を別の定期実行として検証する。即時再送は専用テストで検証する。
+pytestmark = pytest.mark.usefixtures("spaced_sync_runs")

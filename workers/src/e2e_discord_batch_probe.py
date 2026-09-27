@@ -171,7 +171,7 @@ async def _read_state(env, store, manifest, pending: bool, google=None, notifica
         await _read_source(env, slot, stages, retries) for slot in manifest["fixtures"]
     ]
     for index, slot in enumerate(manifest["fixtures"]):
-        if pending and index == 1:
+        if pending and index == 1 and (not notification or not slot.get("notion_page_id")):
             found, error = await _find_page_by_marker(
                 env,
                 _env_text(env, "NOTION_EVENT_INTERNAL_ID"),
@@ -311,6 +311,8 @@ async def _apply_batch(env, store, manifest, index, google=None, notification=No
     scoped_env = google.env if google else _DeltaEnv(env)
     if notification:
         scoped_env = notification.env
+    from e2e_sync_retry import wait_before_retry
+    await wait_before_retry(state, ("discord",))
     result = await run_discord_notion_poll_sync(
         scoped_env,
         state,
@@ -329,12 +331,22 @@ async def _apply_batch(env, store, manifest, index, google=None, notification=No
     }
     deferred = notification is not None and index == 0
     if notification:
-        expected["pending_changes"] = 2 if deferred else 1 if index < 0 else 0
+        expected["pending_changes"] = 2 if deferred else 0 if index < 0 else 1
         expected["error_count"] = 1 if deferred else 0
         expected["errors"] = [f"create_notify_failed:{event_id}"] if deferred else []
         if deferred and not slot.get("reaction_deferred"):
             raise BatchError("discord_notification_failure_not_injected")
-    if result.get("ok") is not (not deferred) or any(
+        if deferred:
+            from sync_retry import RETRY_FIELD, retry_metadata
+            saved = await BatchDiscordKV(store, manifest).state().get_json("sync:discord_notion_queue", [])
+            if not isinstance(saved, list):
+                raise BatchError("discord_batch_queue_invalid")
+            failed = next(op for op in saved if op["id"] == event_id)
+            retry_metadata(failed)
+            slot["notification_retry"] = failed[RETRY_FIELD]
+            await _save(store, manifest)
+    unresolved = notification is not None and index >= 0
+    if result.get("ok") is not (not unresolved) or any(
         result.get(k) != v for k, v in expected.items()
     ):
         raise BatchError("discord_batch_apply_failed")
@@ -547,11 +559,12 @@ async def run_discord_batch_probe(
             await _read_state(env, store, manifest, True, google, notification)
             manifest["stage"] = "batch_applying"
             await _save(store, manifest)
-            retry = notification is not None and not manifest["fixtures"][0].get("reaction_done")
+            retry = notification is not None and bool(manifest["fixtures"][1].get("notion_page_id"))
             await _apply_batch(env, store, manifest, -1 if retry else 1, google, notification)
-            manifest["stage"] = "batch_retry_drained" if retry else "batch_drained"
+            intermediate = notification is not None and not retry
+            manifest["stage"] = "batch_retry_drained" if intermediate else "batch_drained"
             await _save(store, manifest)
-            return {"ok": True, "dirty": True, "status": "retry_drained" if retry else "drained"}
+            return {"ok": True, "dirty": True, "status": "retry_drained" if intermediate else "drained"}
         pending = manifest["stage"] in (
             "batch_pending",
             "batch_pending_verifying",
@@ -566,7 +579,7 @@ async def run_discord_batch_probe(
             not in ("batch_drained", "batch_verifying", "batch_verified")
         ):
             raise BatchError("discord_batch_verify_forbidden")
-        retried = notification is not None and pending and bool(manifest["fixtures"][0].get("reaction_done"))
+        retried = notification is not None and pending and bool(manifest["fixtures"][1].get("notion_page_id"))
         verifying_stage = "batch_pending_verifying" if pending else "batch_verifying"
         verified_stage = "batch_pending_verified" if pending else "batch_verified"
         if retried:

@@ -50,6 +50,8 @@ StateStore
 - `POST /admin/google-token`
 - `POST /admin/gcal/watch/ensure`
 - `GET /admin/migration-status`
+- `GET /admin/sync/quarantine?source=discord|google`
+- `POST /admin/sync/requeue`
 - `GET|POST /jobs/qa-check`
 - `GET|POST /jobs/reminder`
 - `GET|POST /jobs/cleanup`
@@ -79,7 +81,9 @@ StateStore
 
 作成通知が有効な新規イベントは、通知先をqueueの `notification` に保持する。上限超過や同期失敗で繰り越しても、同期成功後に通知する。通知だけが失敗した場合は `op=notify` として保存し、イベントに新しい変更がなければGoogle・Notionを再適用しない。投稿済みのmessage IDがあれば、そのメッセージへの✅リアクションだけを再試行する。通知操作も通常の処理件数上限に含める。イベントが一覧から消えた場合は既存の削除処理へ切り替え、保留通知を送らない。通知待ちの完了イベントが一覧から消えた場合は、同期先を削除せず保留通知だけを取り除く。
 
-通知先チャンネルの変更・無効化時は、保留通知を別チャンネルへ転送せず失敗として保持する。元の設定を復元すれば再試行できる。投稿結果を取得できない場合やKVの保存失敗・古い値の参照では重複投稿があり得るため、一度だけの配信は保証しない。
+通知先チャンネルの変更・無効化時は、保留通知を別チャンネルへ転送せず失敗として保持する。隔離前は設定の復元後に再試行し、隔離後は明示再投入を必要とする。投稿結果を取得できない場合やKVの保存失敗・古い値の参照では重複投稿があり得るため、一度だけの配信は保証しない。
+
+Google適用・Discord差分同期とも、失敗項目を残件の末尾へ移動する。既定では300秒以上空けて5回再試行し、初回を含め6回の失敗で隔離する。期限前・隔離中の項目は処理件数枠を消費しない。Discordの同期・通知・削除で発生する例外はイベント単位で記録し、後続処理を続ける。隔離は既存queue内の状態で表し、snapshotにも保持する。詳細と管理APIは[イベント同期の再試行](SYNC-RETRY.md)を参照。
 
 これは複数キーの原子的更新や厳密な一度限りの適用を保証しない。[Workers KVの結果整合性](https://developers.cloudflare.com/kv/concepts/how-kv-works/)による古い値の参照、既存のロックTTLを超える処理の競合は残る。
 
